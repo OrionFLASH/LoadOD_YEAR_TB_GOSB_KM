@@ -1,24 +1,46 @@
 {
   "paths": {
+    "_c_input_folder": "Папка со входными Excel-файлами (относительно корня проекта).",
+    "_d_input_folder": "Строка-путь, например: IN, data/in, ./IN",
     "input_folder": "IN",
+    "_c_output_folder": "Корневая папка, куда сохраняются результаты обработки.",
+    "_d_output_folder": "Строка-путь, например: OUT, result, export/out",
     "output_folder": "OUT",
+    "_c_log_folder": "Корневая папка для файлов логирования.",
+    "_d_log_folder": "Строка-путь, например: log, logs, output/log",
     "log_folder": "log",
+    "_c_orgunit_folder": "Папка со справочником OrgUnit (CSV).",
+    "_d_orgunit_folder": "Строка-путь, например: IN/OrgUnit, data/orgunit",
     "orgunit_folder": "IN/OrgUnit"
   },
   "patterns": {
+    "_c_input_file_glob": "Маска входных Excel-файлов в input_folder.",
+    "_d_input_file_glob": "Например: *.xlsx, OD_*.xlsx",
     "input_file_glob": "*.xlsx",
+    "_c_orgunit_file_glob": "Маска CSV-файлов OrgUnit в orgunit_folder.",
+    "_d_orgunit_file_glob": "Например: *.csv, ORG_UNIT*.csv",
     "orgunit_file_glob": "*.csv"
   },
   "excel": {
+    "_c_input_sheet": "Имя листа, из которого читаются входные данные.",
+    "_d_input_sheet": "Например: Sheet1, Данные, Export",
     "input_sheet": "Sheet1"
   },
   "processing": {
+    "_c_max_workers": "Количество потоков для параллельной загрузки файлов.",
+    "_d_max_workers": "0 = авто (по os.cpu_count), >0 = фиксированное число потоков (например 4, 8, 12)",
     "max_workers": 0,
+    "_c_xlsx_export_limit": "Лимит строк для решения, выгружать ли таблицу в XLSX.",
+    "_d_xlsx_export_limit": "Целое число, например: 500000, 1000000, 1500000",
     "xlsx_export_limit": 1000000
   },
   "runtime": {
+    "_c_console_verbosity": "Уровень детализации консольного вывода.",
+    "_d_console_verbosity": "quiet | normal | verbose",
     "console_verbosity": "normal"
   },
+  "_c_columns_to_load": "Список колонок, которые читаются из входных Excel-файлов.",
+  "_d_columns_to_load": "Массив строк с точными названиями колонок из файла-источника",
   "columns_to_load": [
     "ИНН_12",
     "ТН 10",
@@ -31,6 +53,8 @@
     "ПРОШЛЫЙ ГОД ОД, тыс. руб.",
     "ТЕКУЩИЙ ГОД ОД, тыс. руб."
   ],
+  "_c_group_key": "Ключ группировки для агрегированного слоя.",
+  "_d_group_key": "Массив строк с именами колонок, например [\"ИНН_12\", \"Код ТБ\", \"Код ГОСБ\", \"Дата загрузки\"]",
   "group_key": [
     "ИНН_12",
     "Код ТБ",
@@ -38,13 +62,29 @@
     "Дата загрузки"
   ],
   "output": {
+    "_c_layout_by_date": "Нужно ли раскладывать выход в подпапки дат.",
+    "_d_layout_by_date": "true | false",
     "layout_by_date": true,
+    "_c_date_layout": "Формат подпапок дат внутри output_folder.",
+    "_d_date_layout": "Поддерживается: YYYY/DD-MM",
     "date_layout": "YYYY/DD-MM",
+    "_c_raw_basename": "Базовое имя raw-выгрузки.",
+    "_d_raw_basename": "Строка, например: 01_raw_combined",
     "raw_basename": "01_raw_combined",
+    "_c_agg_basename": "Базовое имя агрегированной таблицы.",
+    "_d_agg_basename": "Строка, например: 02_aggregated",
     "agg_basename": "02_aggregated",
+    "_c_last_km_basename": "Базовое имя таблицы последнего КМ.",
+    "_d_last_km_basename": "Строка, например: 03_last_km_by_inn_tb",
     "last_km_basename": "03_last_km_by_inn_tb",
+    "_c_dyn_basename": "Базовое имя таблицы динамики.",
+    "_d_dyn_basename": "Строка, например: 04_km_dynamics",
     "dyn_basename": "04_km_dynamics",
+    "_c_final_basename": "Базовое имя финальной таблицы с кластером.",
+    "_d_final_basename": "Строка, например: 05_final_result_with_cluster",
     "final_basename": "05_final_result_with_cluster",
+    "_c_stats_basename": "Базовое имя статистики обработки.",
+    "_d_stats_basename": "Строка, например: 06_statistics",
     "stats_basename": "06_statistics"
   }
 }

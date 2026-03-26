@@ -176,13 +176,9 @@ def resolve_max_workers(config_value: int) -> tuple[int, str]:
     return max(1, cpu_count), "auto"
 
 
-def choose_export_mode(row_counts: list[int]) -> str:
-    """
-    Возвращает режим экспорта:
-    - xlsx: если все таблицы в пределах лимита XLSX_EXPORT_LIMIT;
-    - csv: если хотя бы одна таблица превышает лимит.
-    """
-    return "xlsx" if max(row_counts) < XLSX_EXPORT_LIMIT else "csv"
+def should_export_to_xlsx(row_count: int) -> bool:
+    """Определяет, помещается ли таблица в XLSX по лимиту строк."""
+    return row_count < XLSX_EXPORT_LIMIT
 
 
 def apply_sheet_formatting(ws: Any, headers: list[str]) -> None:
@@ -653,43 +649,36 @@ def main() -> None:
         total_minutes=total_minutes,
     )
 
-    export_mode = choose_export_mode(
-        [
-            len(df_combined),
-            len(agg_df),
-            len(last_km_with_dates),
-            len(dyn_group),
-            len(final_result),
-            len(stats_files_df),
-        ]
-    )
-    cprint(f"Режим экспорта: {export_mode.upper()}")
+    export_items: list[tuple[str, pd.DataFrame, str]] = [
+        ("01_raw_combined", df_combined, output_raw_base),
+        ("02_aggregated", agg_df, output_agg_base),
+        ("03_last_km", last_km_with_dates, output_last_km_base),
+        ("04_km_dynamics", dyn_group, output_dyn_base),
+        ("05_final_cluster", final_result, output_final_base),
+        ("06_stats_files", stats_files_df, f"{output_stats_base}_files"),
+        ("07_stats_summary", stats_summary_df, f"{output_stats_base}_summary"),
+    ]
 
-    if export_mode == "xlsx":
+    xlsx_items = [(sheet, frame) for sheet, frame, _ in export_items if should_export_to_xlsx(len(frame))]
+    csv_items = [(sheet, frame, base) for sheet, frame, base in export_items if not should_export_to_xlsx(len(frame))]
+
+    cprint(
+        f"Режим экспорта: смешанный | XLSX-листов: {len(xlsx_items)} | CSV-файлов: {len(csv_items)}"
+    )
+
+    if xlsx_items:
         wb = Workbook()
         wb.remove(wb.active)
-        write_df_to_sheet(wb, "01_raw_combined", df_combined)
-        write_df_to_sheet(wb, "02_aggregated", agg_df)
-        write_df_to_sheet(wb, "03_last_km", last_km_with_dates)
-        write_df_to_sheet(wb, "04_km_dynamics", dyn_group)
-        write_df_to_sheet(wb, "05_final_cluster", final_result)
-        write_df_to_sheet(wb, "06_stats_files", stats_files_df)
-        write_df_to_sheet(wb, "07_stats_summary", stats_summary_df)
+        for sheet, frame in xlsx_items:
+            write_df_to_sheet(wb, sheet, frame)
         wb.save(output_all_xlsx)
         cprint(f"✓ {os.path.basename(output_all_xlsx)}")
     else:
-        df_combined.to_csv(f"{output_raw_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
-        agg_df.to_csv(f"{output_agg_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
-        last_km_with_dates.to_csv(
-            f"{output_last_km_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig"
-        )
-        dyn_group.to_csv(f"{output_dyn_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
-        final_result.to_csv(f"{output_final_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
-        stats_files_df.to_csv(f"{output_stats_base}_files.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
-        stats_summary_df.to_csv(
-            f"{output_stats_base}_summary.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig"
-        )
-        cprint("✓ CSV-файлы сохранены (XLSX не создавался)")
+        cprint("XLSX не создан: все таблицы превышают лимит строк.")
+
+    for sheet, frame, base in csv_items:
+        frame.to_csv(f"{base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
+        cprint(f"✓ {os.path.basename(base)}.csv ({sheet})", level="verbose")
 
     stage_elapsed = time.perf_counter() - stage_start
     total_elapsed = time.perf_counter() - total_start_perf
@@ -704,16 +693,16 @@ def main() -> None:
     cprint("=" * 70)
     cprint(f"⏱ ОБЩЕЕ ВРЕМЯ: {total_time:.1f} сек ({total_time / 60:.2f} мин)")
     cprint("\nВыходные файлы в OUT:")
-    if export_mode == "xlsx":
-        cprint(f"  1. {os.path.basename(output_all_xlsx)}   <-- все данные на листах")
+    if xlsx_items:
+        cprint(f"  XLSX: {os.path.basename(output_all_xlsx)}")
     else:
-        cprint(f"  1. {os.path.basename(output_raw_base)}.csv", level="verbose")
-        cprint(f"  2. {os.path.basename(output_agg_base)}.csv", level="verbose")
-        cprint(f"  3. {os.path.basename(output_last_km_base)}.csv", level="verbose")
-        cprint(f"  4. {os.path.basename(output_dyn_base)}.csv", level="verbose")
-        cprint(f"  5. {os.path.basename(output_final_base)}.csv   <-- основной итог")
-        cprint(f"  6. {os.path.basename(output_stats_base)}_files.csv", level="verbose")
-        cprint(f"  7. {os.path.basename(output_stats_base)}_summary.csv", level="verbose")
+        cprint("  XLSX: не создан")
+    if csv_items:
+        cprint("  CSV:")
+        for _, _, base in csv_items:
+            cprint(f"    - {os.path.basename(base)}.csv", level="normal")
+    else:
+        cprint("  CSV: не созданы")
     cprint("=" * 70)
 
 
