@@ -21,11 +21,13 @@ import json
 import logging
 import os
 import re
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from openpyxl import Workbook
 
@@ -230,14 +232,28 @@ def load_single_file(file_path: str) -> tuple[pd.DataFrame | None, dict[str, Any
         file_stat["Строк исходных"] = len(df)
         df["ИмяФайла"] = file_name
 
-        # Нормализация ключевых идентификаторов по приоритету ToDo.
-        df["ИНН_12"] = df["ИНН_12"].apply(normalize_inn)
-        df["ТН 10"] = df["ТН 10"].apply(normalize_tn10)
-        df["Код ТБ"] = df["Код ТБ"].apply(normalize_code)
-        df["Код ГОСБ"] = df["Код ГОСБ"].apply(normalize_code)
-        df["ТБ"] = df["ТБ"].astype(str).str.strip()
-        df["ГОСБ"] = df["ГОСБ"].astype(str).str.strip()
-        df["КМ"] = df["КМ"].astype(str).str.strip()
+        # Векторная нормализация ключевых полей: заметно быстрее apply() на больших данных.
+        df["ИНН_12"] = (
+            df["ИНН_12"]
+            .astype("string")
+            .fillna("")
+            .str.replace(r"\D", "", regex=True)
+            .str.zfill(12)
+            .str.slice(0, 12)
+        )
+        df["ТН 10"] = (
+            df["ТН 10"]
+            .astype("string")
+            .fillna("")
+            .str.replace(r"\D", "", regex=True)
+            .str.zfill(8)
+            .str.slice(0, 8)
+        )
+        df["Код ТБ"] = df["Код ТБ"].astype("string").fillna("").str.strip()
+        df["Код ГОСБ"] = df["Код ГОСБ"].astype("string").fillna("").str.strip()
+        df["ТБ"] = df["ТБ"].astype("string").fillna("").str.strip()
+        df["ГОСБ"] = df["ГОСБ"].astype("string").fillna("").str.strip()
+        df["КМ"] = df["КМ"].astype("string").fillna("").str.strip()
 
         df["Дата загрузки"] = pd.to_datetime(df["Дата загрузки"], errors="coerce")
         df["ПРОШЛЫЙ ГОД ОД, тыс. руб."] = pd.to_numeric(
@@ -351,6 +367,7 @@ def main() -> None:
     print(f"ЗАГРУЗКА ФАЙЛОВ (параллельно, {MAX_WORKERS} потоков)")
     print("=" * 70)
 
+    stage_start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_file = {executor.submit(load_single_file, path): path for path in file_list}
         completed = 0
@@ -367,12 +384,17 @@ def main() -> None:
                 )
             else:
                 print(f"[{completed:2d}/{len(file_list)}] ✗ {file_name}: {file_stat['Ошибка'][:55]}")
+    print(f"⏱ Этап загрузки: {time.perf_counter() - stage_start:.1f} сек")
 
     if not dfs:
         raise RuntimeError("Нет успешно загруженных файлов.")
 
+    print("\nОбъединение данных...")
+    stage_start = time.perf_counter()
     df_combined = pd.concat(dfs, ignore_index=True, copy=False)
     del dfs
+    print(f"Объединено строк: {len(df_combined):,}")
+    print(f"⏱ Этап объединения: {time.perf_counter() - stage_start:.1f} сек")
 
     total_grey_removed = sum(s["Удалено серая зона"] for s in stats if s["Статус"] == "OK")
     errors_date = int(df_combined["Дата загрузки"].isna().sum())
@@ -387,8 +409,14 @@ def main() -> None:
     output_final_base = os.path.join(RUN_OUTPUT_FOLDER, f"{FINAL_BASENAME}_{TIMESTAMP}")
     output_stats_xlsx = os.path.join(RUN_OUTPUT_FOLDER, f"{STATS_BASENAME}_{TIMESTAMP}.xlsx")
 
+    print("\nСохранение сырого слоя...")
+    stage_start = time.perf_counter()
     df_combined.to_csv(output_raw_csv, index=False, sep=";", decimal=",", encoding="utf-8-sig")
+    print(f"✓ {os.path.basename(output_raw_csv)}")
+    print(f"⏱ Этап сохранения raw: {time.perf_counter() - stage_start:.1f} сек")
 
+    print("\nАгрегация по ключу...")
+    stage_start = time.perf_counter()
     agg_df = df_combined.groupby(GROUP_KEY, as_index=False, dropna=False, sort=False).agg(
         {
             "ПРОШЛЫЙ ГОД ОД, тыс. руб.": "sum",
@@ -403,15 +431,17 @@ def main() -> None:
         inplace=True,
     )
     agg_df.to_csv(output_agg_csv, index=False, sep=";", decimal=",", encoding="utf-8-sig")
+    print(f"Агрегированных строк: {len(agg_df):,}")
+    print(f"✓ {os.path.basename(output_agg_csv)}")
+    print(f"⏱ Этап агрегации: {time.perf_counter() - stage_start:.1f} сек")
 
+    print("\nОпределение последнего КМ...")
+    stage_start = time.perf_counter()
     df_for_last_km = df_combined[df_combined["Дата загрузки"].notna()].copy()
-    grouped_by_date = (
-        df_for_last_km.groupby(
-            ["ИНН_12", "Код ТБ", "Код ГОСБ", "Дата загрузки"], as_index=False, dropna=False, sort=False
-        )
-        .apply(get_max_od_row, include_groups=False)
-        .reset_index(drop=True)
-    )
+    max_keys = ["ИНН_12", "Код ТБ", "Код ГОСБ", "Дата загрузки"]
+    curr_fill = df_for_last_km["ТЕКУЩИЙ ГОД ОД, тыс. руб."].fillna(float("-inf"))
+    idx_max = curr_fill.groupby([df_for_last_km[k] for k in max_keys], sort=False, dropna=False).idxmax()
+    grouped_by_date = df_for_last_km.loc[idx_max.values].reset_index(drop=True)
 
     last_dates = grouped_by_date.groupby(
         ["ИНН_12", "Код ТБ", "Код ГОСБ"], as_index=False, dropna=False, sort=False
@@ -454,7 +484,11 @@ def main() -> None:
         how="left",
     )
     save_table(last_km_with_dates, output_last_km_base)
+    print(f"Строк в 03_last_km_by_inn_tb: {len(last_km_with_dates):,}")
+    print(f"⏱ Этап последнего КМ: {time.perf_counter() - stage_start:.1f} сек")
 
+    print("\nРасчет динамики по последнему КМ...")
+    stage_start = time.perf_counter()
     last_km_key = last_km_result[["ИНН_12", "Код ТБ", "Код ГОСБ", "Последний КМ"]]
     df_with_last = pd.merge(
         df_combined,
@@ -486,16 +520,33 @@ def main() -> None:
     dyn_group["Прирост ОД, тыс. руб."] = (
         dyn_group["Сумма ТЕКУЩИЙ ГОД ОД, тыс. руб."] - dyn_group["Сумма ПРОШЛЫЙ ГОД ОД, тыс. руб."]
     )
-    dyn_group["Темп прироста, %"] = dyn_group.apply(calc_growth_rate, axis=1)
+    prev_vals = dyn_group["Сумма ПРОШЛЫЙ ГОД ОД, тыс. руб."].to_numpy()
+    curr_vals = dyn_group["Сумма ТЕКУЩИЙ ГОД ОД, тыс. руб."].to_numpy()
+    nan_mask = np.isnan(prev_vals) | np.isnan(curr_vals)
+    zero_prev_mask = prev_vals == 0
+    base_rate = (curr_vals - prev_vals) / np.abs(prev_vals) * 100.0
+    zero_rate = np.where(curr_vals > 0, 100.0, np.where(curr_vals < 0, -100.0, 0.0))
+    growth_rate = np.where(zero_prev_mask, zero_rate, base_rate)
+    growth_rate = np.where(nan_mask, np.nan, growth_rate)
+    dyn_group["Темп прироста, %"] = growth_rate
 
     save_table(dyn_group, output_dyn_base)
+    print(f"Строк в 04_km_dynamics: {len(dyn_group):,}")
+    print(f"⏱ Этап динамики: {time.perf_counter() - stage_start:.1f} сек")
 
+    print("\nЗагрузка OrgUnit и обогащение кластером...")
+    stage_start = time.perf_counter()
     orgunit_map = load_orgunit_mapping()
     final_result = pd.merge(dyn_group, orgunit_map, on="Код ГОСБ", how="left")
     final_result["Кластер"] = final_result["Кластер"].fillna("НЕ НАЙДЕН")
     save_table(final_result, output_final_base)
+    print(f"Строк в 05_final_result_with_cluster: {len(final_result):,}")
+    print(f"Непросопоставленных кластеров: {int((final_result['Кластер'] == 'НЕ НАЙДЕН').sum()):,}")
+    print(f"⏱ Этап кластера: {time.perf_counter() - stage_start:.1f} сек")
 
     # ===== СТАТИСТИКА =====
+    print("\nФормирование статистики...")
+    stage_start = time.perf_counter()
     stats.sort(key=lambda x: x["Файл"])
     wb = Workbook()
     ws = wb.active
@@ -551,6 +602,8 @@ def main() -> None:
     ws.append(["Общее время (мин)", round((datetime.now() - total_start).total_seconds() / 60, 2)])
     auto_fit_worksheet(ws)
     wb.save(output_stats_xlsx)
+    print(f"✓ {os.path.basename(output_stats_xlsx)}")
+    print(f"⏱ Этап статистики: {time.perf_counter() - stage_start:.1f} сек")
 
     total_time = (datetime.now() - total_start).total_seconds()
     LOGGER.info("Обработка завершена успешно за %.2f сек", total_time)
