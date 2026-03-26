@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 warnings.filterwarnings("ignore")
 
@@ -164,6 +165,23 @@ def fmt_elapsed(seconds: float) -> str:
     return f"{seconds:.2f}с"
 
 
+def normalize_gosb_code(series: pd.Series) -> pd.Series:
+    """
+    Приводит «Код ГОСБ» к одному строковому виду для merge с OrgUnit.
+
+    В Excel колонка часто числовая: при чтении получается float и строка вида «4001.0»,
+    тогда как в CSV справочника — «4001», и merge не находит совпадений.
+    Целые числа (в т.ч. из float) переводим в строку без десятичной части.
+    """
+    num = pd.to_numeric(series, errors="coerce")
+    text = series.astype("string").fillna("").str.strip()
+    # Целые значения — единый формат «123», без «123.0»
+    is_whole = num.notna() & (num % 1 == 0)
+    out = text.copy()
+    out.loc[is_whole] = num.loc[is_whole].astype(np.int64).astype(str)
+    return out
+
+
 def resolve_max_workers(config_value: int) -> tuple[int, str]:
     """
     Определяет число потоков:
@@ -218,8 +236,8 @@ def write_df_to_sheet(wb: Workbook, sheet_name: str, df: pd.DataFrame) -> None:
     for col in export_df.columns:
         if "Темп прироста" in str(col):
             export_df[col] = pd.to_numeric(export_df[col], errors="coerce") / 100.0
-    ws.append(list(export_df.columns))
-    for row in export_df.itertuples(index=False, name=None):
+    # Пакетная запись через dataframe_to_rows быстрее, чем построчный itertuples + append.
+    for row in dataframe_to_rows(export_df, index=False, header=True):
         ws.append(list(row))
     apply_sheet_formatting(ws, list(export_df.columns))
 
@@ -311,7 +329,7 @@ def load_single_file(file_path: str) -> tuple[pd.DataFrame | None, dict[str, Any
             .str.slice(0, 8)
         )
         df["Код ТБ"] = df["Код ТБ"].astype("string").fillna("").str.strip()
-        df["Код ГОСБ"] = df["Код ГОСБ"].astype("string").fillna("").str.strip()
+        df["Код ГОСБ"] = normalize_gosb_code(df["Код ГОСБ"])
         df["ТБ"] = df["ТБ"].astype("string").fillna("").str.strip()
         df["ГОСБ"] = df["ГОСБ"].astype("string").fillna("").str.strip()
         df["КМ"] = df["КМ"].astype("string").fillna("").str.strip()
@@ -353,29 +371,47 @@ def load_orgunit_mapping() -> pd.DataFrame:
         LOGGER.warning("Папка OrgUnit не найдена: %s", ORGUNIT_FOLDER)
         return pd.DataFrame(columns=["Код ГОСБ", "Кластер"])
 
-    csv_files = sorted(glob.glob(os.path.join(ORGUNIT_FOLDER, ORGUNIT_FILE_GLOB)))
+    csv_files = glob.glob(os.path.join(ORGUNIT_FOLDER, ORGUNIT_FILE_GLOB))
     if not csv_files:
         LOGGER.warning("CSV-файлы в OrgUnit не найдены: %s", ORGUNIT_FOLDER)
         return pd.DataFrame(columns=["Код ГОСБ", "Кластер"])
 
+    # Файлы с подстрокой TEST в имени идут в конец — чтобы не перекрывать полный справочник.
+    csv_files = sorted(
+        csv_files,
+        key=lambda p: ("TEST" in os.path.basename(p).upper(), os.path.basename(p).lower()),
+    )
     org_path = csv_files[0]
     LOGGER.info("Загрузка OrgUnit: %s", os.path.basename(org_path))
     log_debug(f"Читаем OrgUnit файл: {org_path}", def_name="load_orgunit_mapping")
 
     # Пытаемся прочитать как ';', если не подходит - читаем как ','.
     org_df = pd.read_csv(org_path, sep=";", dtype=str, encoding="utf-8", engine="python")
-    if "GOSB_CODE" not in org_df.columns or "CLUSTER" not in org_df.columns:
+    org_df.columns = [str(c).strip().lstrip("\ufeff") for c in org_df.columns]
+    if "GOSB_CODE" not in org_df.columns:
         org_df = pd.read_csv(org_path, sep=",", dtype=str, encoding="utf-8", engine="python")
+        org_df.columns = [str(c).strip().lstrip("\ufeff") for c in org_df.columns]
 
-    if "GOSB_CODE" not in org_df.columns or "CLUSTER" not in org_df.columns:
+    cluster_src: str | None = None
+    if "CLUSTER" in org_df.columns:
+        cluster_src = "CLUSTER"
+    elif "CLUSTER_CODE" in org_df.columns:
+        cluster_src = "CLUSTER_CODE"
+
+    if "GOSB_CODE" not in org_df.columns or cluster_src is None:
         raise ValueError(
-            "Файл OrgUnit должен содержать колонки GOSB_CODE и CLUSTER."
+            "Файл OrgUnit должен содержать колонку GOSB_CODE и одну из: CLUSTER, CLUSTER_CODE."
         )
 
-    org_df = org_df[["GOSB_CODE", "CLUSTER"]].copy()
-    org_df["Код ГОСБ"] = org_df["GOSB_CODE"].astype("string").fillna("").str.strip()
+    org_df = org_df[["GOSB_CODE", cluster_src]].copy()
+    org_df.rename(columns={cluster_src: "CLUSTER"}, inplace=True)
+    org_df["Код ГОСБ"] = normalize_gosb_code(org_df["GOSB_CODE"])
     org_df["Кластер"] = org_df["CLUSTER"].astype("string").fillna("").str.strip()
     org_df = org_df[["Код ГОСБ", "Кластер"]].drop_duplicates()
+    LOGGER.info(
+        "OrgUnit: уникальных кодов ГОСБ в справочнике: %d",
+        org_df["Код ГОСБ"].nunique(),
+    )
     return org_df
 
 
@@ -621,6 +657,12 @@ def main() -> None:
     orgunit_map = load_orgunit_mapping()
     final_result = pd.merge(dyn_group, orgunit_map, on="Код ГОСБ", how="left")
     final_result["Кластер"] = final_result["Кластер"].fillna("НЕ НАЙДЕН")
+    matched_cluster = int((final_result["Кластер"] != "НЕ НАЙДЕН").sum())
+    LOGGER.info(
+        "Кластер: совпало со справочником OrgUnit %d строк из %d",
+        matched_cluster,
+        len(final_result),
+    )
     cprint(f"Строк в 05_final_result_with_cluster: {len(final_result):,}")
     cprint(f"Непросопоставленных кластеров: {int((final_result['Кластер'] == 'НЕ НАЙДЕН').sum()):,}")
     stage_elapsed = time.perf_counter() - stage_start
