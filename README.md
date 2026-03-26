@@ -184,24 +184,25 @@ LoadOD_YEAR_TB_GOSB_KM/
 
 ## 8. Выходные файлы
 
-Выход складывается в:
-- `OUT/YYYY/DD-MM`
+Выход складывается в `OUT/YYYY/DD-MM`.
 
-Где:
-- `YYYY` — год запуска (4 цифры)
-- `DD-MM` — день-месяц с ведущими нулями
+Режим выбирается автоматически:
+- **XLSX-режим**: если все таблицы меньше `processing.xlsx_export_limit`, создается **один файл**:
+  - `00_all_results_<TIMESTAMP>.xlsx`
+  - листы: `01_raw_combined`, `02_aggregated`, `03_last_km`, `04_km_dynamics`, `05_final_cluster`, `06_stats_files`, `07_stats_summary`.
+- **CSV-режим**: если хотя бы одна таблица превышает лимит, создаются **только CSV** (без XLSX).
 
-Создаются:
-- `01_raw_combined_<TIMESTAMP>.csv`
-- `02_aggregated_<TIMESTAMP>.csv`
-- `03_last_km_by_inn_tb_<TIMESTAMP>.csv` и при малом объеме `.xlsx`
-- `04_km_dynamics_<TIMESTAMP>.csv` и при малом объеме `.xlsx`
-- `05_final_result_with_cluster_<TIMESTAMP>.csv` и при малом объеме `.xlsx`
-- `06_statistics_<TIMESTAMP>.xlsx`
+### 8.1. Форматирование листов в XLSX-режиме
 
-Правило экспорта:
-- CSV — всегда;
-- XLSX — только если строк меньше `processing.xlsx_export_limit`.
+На всех листах:
+- первая строка — заголовок;
+- заголовок зафиксирован (`freeze panes`);
+- включен автофильтр.
+
+Форматы данных:
+- `ПРОШЛЫЙ/ТЕКУЩИЙ ОД` и `Прирост` — числовой формат `#,##0.00`;
+- поля с `Дата` — формат даты `DD.MM.YYYY`;
+- `Темп прироста, %` — процентный формат `0.00%`.
 
 ---
 

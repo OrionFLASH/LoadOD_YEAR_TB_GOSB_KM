@@ -29,6 +29,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings("ignore")
 
@@ -175,17 +176,99 @@ def resolve_max_workers(config_value: int) -> tuple[int, str]:
     return max(1, cpu_count), "auto"
 
 
-def save_table(df: pd.DataFrame, base_path_without_ext: str) -> int:
-    """Сохранение таблицы: всегда CSV и XLSX, если строк меньше лимита."""
-    rows = len(df)
-    csv_path = f"{base_path_without_ext}.csv"
-    df.to_csv(csv_path, index=False, sep=";", decimal=",", encoding="utf-8-sig")
+def choose_export_mode(row_counts: list[int]) -> str:
+    """
+    Возвращает режим экспорта:
+    - xlsx: если все таблицы в пределах лимита XLSX_EXPORT_LIMIT;
+    - csv: если хотя бы одна таблица превышает лимит.
+    """
+    return "xlsx" if max(row_counts) < XLSX_EXPORT_LIMIT else "csv"
 
-    if rows < XLSX_EXPORT_LIMIT:
-        xlsx_path = f"{base_path_without_ext}.xlsx"
-        df.to_excel(xlsx_path, index=False, engine="openpyxl")
 
-    return rows
+def apply_sheet_formatting(ws: Any, headers: list[str]) -> None:
+    """Применяет форматирование: заголовок, freeze, фильтры, форматы данных."""
+    if not headers:
+        return
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{ws.max_row}"
+
+    for col_idx, col_name in enumerate(headers, start=1):
+        col_letter = get_column_letter(col_idx)
+        name = str(col_name)
+        is_amount = ("ПРОШЛЫЙ" in name) or ("ТЕКУЩИЙ" in name) or ("Прирост" in name)
+        is_date = "Дата" in name
+        is_percent = "Темп прироста" in name
+
+        if is_amount:
+            num_fmt = "#,##0.00"
+        elif is_date:
+            num_fmt = "DD.MM.YYYY"
+        elif is_percent:
+            num_fmt = "0.00%"
+        else:
+            num_fmt = None
+
+        if num_fmt is not None:
+            for row_idx in range(2, ws.max_row + 1):
+                ws[f"{col_letter}{row_idx}"].number_format = num_fmt
+
+    auto_fit_worksheet(ws)
+
+
+def write_df_to_sheet(wb: Workbook, sheet_name: str, df: pd.DataFrame) -> None:
+    """Записывает DataFrame на лист с базовым форматированием."""
+    ws = wb.create_sheet(title=sheet_name[:31])
+    export_df = df.copy()
+    for col in export_df.columns:
+        if "Темп прироста" in str(col):
+            export_df[col] = pd.to_numeric(export_df[col], errors="coerce") / 100.0
+    ws.append(list(export_df.columns))
+    for row in export_df.itertuples(index=False, name=None):
+        ws.append(list(row))
+    apply_sheet_formatting(ws, list(export_df.columns))
+
+
+def build_stats_frames(
+    stats: list[dict[str, Any]],
+    timestamp: str,
+    workers: int,
+    workers_mode: str,
+    df_combined: pd.DataFrame,
+    total_grey_removed: int,
+    agg_df: pd.DataFrame,
+    last_km_result: pd.DataFrame,
+    last_km_with_dates: pd.DataFrame,
+    dyn_group: pd.DataFrame,
+    final_result: pd.DataFrame,
+    total_errors: int,
+    orgunit_map: pd.DataFrame,
+    total_minutes: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Готовит таблицу статистики по файлам и таблицу итогов."""
+    stats_files_df = pd.DataFrame(stats)
+    summary_df = pd.DataFrame(
+        [
+            ("Время обработки", timestamp),
+            ("Потоков (факт)", workers),
+            ("Режим потоков", workers_mode),
+            ("Всего XLSX файлов", len(stats)),
+            ("Успешно загружено", len([s for s in stats if s["Статус"] == "OK"])),
+            ("С ошибками", len([s for s in stats if s["Статус"] == "ОШИБКА"])),
+            ("Всего строк (без серой)", len(df_combined)),
+            ("Удалено серой зоны", total_grey_removed),
+            ("Агрегированных строк", len(agg_df)),
+            ("Записей последнего КМ", len(last_km_result)),
+            ("Строк в таблице КМ+даты", len(last_km_with_dates)),
+            ("Строк в динамике", len(dyn_group)),
+            ("Строк в финальном файле (с кластером)", len(final_result)),
+            ("Ошибок типов", total_errors),
+            ("OrgUnit записей", len(orgunit_map)),
+            ("OrgUnit непросопоставленных (НЕ НАЙДЕН)", int((final_result["Кластер"] == "НЕ НАЙДЕН").sum())),
+            ("Общее время (мин)", total_minutes),
+        ],
+        columns=["Показатель", "Значение"],
+    )
+    return stats_files_df, summary_df
 
 
 def load_single_file(file_path: str) -> tuple[pd.DataFrame | None, dict[str, Any]]:
@@ -397,17 +480,17 @@ def main() -> None:
     errors_curr = int(df_combined["ТЕКУЩИЙ ГОД ОД, тыс. руб."].isna().sum())
     total_errors = errors_date + errors_prev + errors_curr
 
-    output_raw_csv = os.path.join(RUN_OUTPUT_FOLDER, f"{RAW_BASENAME}_{TIMESTAMP}.csv")
-    output_agg_csv = os.path.join(RUN_OUTPUT_FOLDER, f"{AGG_BASENAME}_{TIMESTAMP}.csv")
+    output_raw_base = os.path.join(RUN_OUTPUT_FOLDER, f"{RAW_BASENAME}_{TIMESTAMP}")
+    output_agg_base = os.path.join(RUN_OUTPUT_FOLDER, f"{AGG_BASENAME}_{TIMESTAMP}")
     output_last_km_base = os.path.join(RUN_OUTPUT_FOLDER, f"{LAST_KM_BASENAME}_{TIMESTAMP}")
     output_dyn_base = os.path.join(RUN_OUTPUT_FOLDER, f"{DYN_BASENAME}_{TIMESTAMP}")
     output_final_base = os.path.join(RUN_OUTPUT_FOLDER, f"{FINAL_BASENAME}_{TIMESTAMP}")
-    output_stats_xlsx = os.path.join(RUN_OUTPUT_FOLDER, f"{STATS_BASENAME}_{TIMESTAMP}.xlsx")
+    output_stats_base = os.path.join(RUN_OUTPUT_FOLDER, f"{STATS_BASENAME}_{TIMESTAMP}")
+    output_all_xlsx = os.path.join(RUN_OUTPUT_FOLDER, f"00_all_results_{TIMESTAMP}.xlsx")
 
     cprint("\nСохранение сырого слоя...", level="verbose")
     stage_start = time.perf_counter()
-    df_combined.to_csv(output_raw_csv, index=False, sep=";", decimal=",", encoding="utf-8-sig")
-    cprint(f"✓ {os.path.basename(output_raw_csv)}", level="verbose")
+    cprint(f"raw-слой подготовлен, строк: {len(df_combined):,}", level="verbose")
     stage_elapsed = time.perf_counter() - stage_start
     total_elapsed = time.perf_counter() - total_start_perf
     cprint(
@@ -430,9 +513,8 @@ def main() -> None:
         },
         inplace=True,
     )
-    agg_df.to_csv(output_agg_csv, index=False, sep=";", decimal=",", encoding="utf-8-sig")
     cprint(f"Агрегированных строк: {len(agg_df):,}")
-    cprint(f"✓ {os.path.basename(output_agg_csv)}", level="verbose")
+    cprint("Агрегат подготовлен", level="verbose")
     stage_elapsed = time.perf_counter() - stage_start
     total_elapsed = time.perf_counter() - total_start_perf
     cprint(f"⏱ Этап агрегации: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
@@ -485,7 +567,6 @@ def main() -> None:
         on=["ИНН_12", "Код ТБ", "Код ГОСБ"],
         how="left",
     )
-    save_table(last_km_with_dates, output_last_km_base)
     cprint(f"Строк в 03_last_km_by_inn_tb: {len(last_km_with_dates):,}")
     stage_elapsed = time.perf_counter() - stage_start
     total_elapsed = time.perf_counter() - total_start_perf
@@ -534,7 +615,6 @@ def main() -> None:
     growth_rate = np.where(nan_mask, np.nan, growth_rate)
     dyn_group["Темп прироста, %"] = growth_rate
 
-    save_table(dyn_group, output_dyn_base)
     cprint(f"Строк в 04_km_dynamics: {len(dyn_group):,}")
     stage_elapsed = time.perf_counter() - stage_start
     total_elapsed = time.perf_counter() - total_start_perf
@@ -545,79 +625,75 @@ def main() -> None:
     orgunit_map = load_orgunit_mapping()
     final_result = pd.merge(dyn_group, orgunit_map, on="Код ГОСБ", how="left")
     final_result["Кластер"] = final_result["Кластер"].fillna("НЕ НАЙДЕН")
-    save_table(final_result, output_final_base)
     cprint(f"Строк в 05_final_result_with_cluster: {len(final_result):,}")
     cprint(f"Непросопоставленных кластеров: {int((final_result['Кластер'] == 'НЕ НАЙДЕН').sum()):,}")
     stage_elapsed = time.perf_counter() - stage_start
     total_elapsed = time.perf_counter() - total_start_perf
     cprint(f"⏱ Этап кластера: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
 
-    # ===== СТАТИСТИКА =====
-    cprint("\nФормирование статистики...", level="verbose")
+    # ===== ФОРМИРОВАНИЕ СТАТИСТИКИ + ЭКСПОРТ =====
+    cprint("\nФормирование статистики и итогового экспорта...")
     stage_start = time.perf_counter()
     stats.sort(key=lambda x: x["Файл"])
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Статистика"
-    ws.append(
-        [
-            "Файл",
-            "Статус",
-            "Ошибка",
-            "Строк исходных",
-            "Строк после фильтра",
-            "Удалено серая зона",
-            "Ошибок типов",
-            "Время загрузки (сек)",
-        ]
+    total_minutes = round((datetime.now() - total_start).total_seconds() / 60, 2)
+    stats_files_df, stats_summary_df = build_stats_frames(
+        stats=stats,
+        timestamp=TIMESTAMP,
+        workers=resolved_workers,
+        workers_mode=workers_mode,
+        df_combined=df_combined,
+        total_grey_removed=total_grey_removed,
+        agg_df=agg_df,
+        last_km_result=last_km_result,
+        last_km_with_dates=last_km_with_dates,
+        dyn_group=dyn_group,
+        final_result=final_result,
+        total_errors=total_errors,
+        orgunit_map=orgunit_map,
+        total_minutes=total_minutes,
     )
-    for stat in stats:
-        ws.append(
-            [
-                stat["Файл"],
-                stat["Статус"],
-                stat["Ошибка"],
-                stat["Строк исходных"],
-                stat["Строк после фильтра"],
-                stat["Удалено серая зона"],
-                stat["Ошибок типов"],
-                stat["Время загрузки (сек)"],
-            ]
-        )
 
-    ws.append([])
-    ws.append(["ИТОГО:"])
-    ws.append(["Время обработки", TIMESTAMP])
-    ws.append(["Потоков (факт)", resolved_workers])
-    ws.append(["Режим потоков", workers_mode])
-    ws.append(["Всего XLSX файлов", len(file_list)])
-    ws.append(["Успешно загружено", len([s for s in stats if s["Статус"] == "OK"])])
-    ws.append(["С ошибками", len([s for s in stats if s["Статус"] == "ОШИБКА"])])
-    ws.append(["Всего строк (без серой)", len(df_combined)])
-    ws.append(["Удалено серой зоны", total_grey_removed])
-    ws.append(["Агрегированных строк", len(agg_df)])
-    ws.append(["Записей последнего КМ", len(last_km_result)])
-    ws.append(["Строк в таблице КМ+даты", len(last_km_with_dates)])
-    ws.append(["Строк в динамике", len(dyn_group)])
-    ws.append(["Строк в финальном файле (с кластером)", len(final_result)])
-    ws.append(["Ошибок типов", total_errors])
-    ws.append(["OrgUnit записей", len(orgunit_map)])
-    ws.append(
+    export_mode = choose_export_mode(
         [
-            "OrgUnit непросопоставленных (НЕ НАЙДЕН)",
-            int((final_result["Кластер"] == "НЕ НАЙДЕН").sum()),
+            len(df_combined),
+            len(agg_df),
+            len(last_km_with_dates),
+            len(dyn_group),
+            len(final_result),
+            len(stats_files_df),
         ]
     )
-    ws.append(["Общее время (мин)", round((datetime.now() - total_start).total_seconds() / 60, 2)])
-    auto_fit_worksheet(ws)
-    wb.save(output_stats_xlsx)
-    cprint(f"✓ {os.path.basename(output_stats_xlsx)}", level="verbose")
+    cprint(f"Режим экспорта: {export_mode.upper()}")
+
+    if export_mode == "xlsx":
+        wb = Workbook()
+        wb.remove(wb.active)
+        write_df_to_sheet(wb, "01_raw_combined", df_combined)
+        write_df_to_sheet(wb, "02_aggregated", agg_df)
+        write_df_to_sheet(wb, "03_last_km", last_km_with_dates)
+        write_df_to_sheet(wb, "04_km_dynamics", dyn_group)
+        write_df_to_sheet(wb, "05_final_cluster", final_result)
+        write_df_to_sheet(wb, "06_stats_files", stats_files_df)
+        write_df_to_sheet(wb, "07_stats_summary", stats_summary_df)
+        wb.save(output_all_xlsx)
+        cprint(f"✓ {os.path.basename(output_all_xlsx)}")
+    else:
+        df_combined.to_csv(f"{output_raw_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
+        agg_df.to_csv(f"{output_agg_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
+        last_km_with_dates.to_csv(
+            f"{output_last_km_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig"
+        )
+        dyn_group.to_csv(f"{output_dyn_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
+        final_result.to_csv(f"{output_final_base}.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
+        stats_files_df.to_csv(f"{output_stats_base}_files.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
+        stats_summary_df.to_csv(
+            f"{output_stats_base}_summary.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig"
+        )
+        cprint("✓ CSV-файлы сохранены (XLSX не создавался)")
+
     stage_elapsed = time.perf_counter() - stage_start
     total_elapsed = time.perf_counter() - total_start_perf
-    cprint(
-        f"⏱ Этап статистики: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}",
-        level="verbose",
-    )
+    cprint(f"⏱ Этап экспорта: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
 
     total_time = (datetime.now() - total_start).total_seconds()
     LOGGER.info("Обработка завершена успешно за %.2f сек", total_time)
@@ -628,12 +704,16 @@ def main() -> None:
     cprint("=" * 70)
     cprint(f"⏱ ОБЩЕЕ ВРЕМЯ: {total_time:.1f} сек ({total_time / 60:.2f} мин)")
     cprint("\nВыходные файлы в OUT:")
-    cprint(f"  1. {os.path.basename(output_raw_csv)}")
-    cprint(f"  2. {os.path.basename(output_agg_csv)}", level="verbose")
-    cprint(f"  3. {os.path.basename(output_last_km_base)}.csv[.xlsx]", level="verbose")
-    cprint(f"  4. {os.path.basename(output_dyn_base)}.csv[.xlsx]", level="verbose")
-    cprint(f"  5. {os.path.basename(output_final_base)}.csv[.xlsx]   <-- основной итог")
-    cprint(f"  6. {os.path.basename(output_stats_xlsx)}", level="verbose")
+    if export_mode == "xlsx":
+        cprint(f"  1. {os.path.basename(output_all_xlsx)}   <-- все данные на листах")
+    else:
+        cprint(f"  1. {os.path.basename(output_raw_base)}.csv", level="verbose")
+        cprint(f"  2. {os.path.basename(output_agg_base)}.csv", level="verbose")
+        cprint(f"  3. {os.path.basename(output_last_km_base)}.csv", level="verbose")
+        cprint(f"  4. {os.path.basename(output_dyn_base)}.csv", level="verbose")
+        cprint(f"  5. {os.path.basename(output_final_base)}.csv   <-- основной итог")
+        cprint(f"  6. {os.path.basename(output_stats_base)}_files.csv", level="verbose")
+        cprint(f"  7. {os.path.basename(output_stats_base)}_summary.csv", level="verbose")
     cprint("=" * 70)
 
 
