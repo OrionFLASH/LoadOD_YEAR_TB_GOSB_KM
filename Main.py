@@ -657,6 +657,19 @@ def main() -> None:
     orgunit_map = load_orgunit_mapping()
     final_result = pd.merge(dyn_group, orgunit_map, on="Код ГОСБ", how="left")
     final_result["Кластер"] = final_result["Кластер"].fillna("НЕ НАЙДЕН")
+    # Медианы по всем строкам с тем же кластером (для сравнения строки с «типичным» уровнем кластера).
+    # В именах сохраняем «Прирост» / «Темп прироста», чтобы форматирование листа совпало с остальными колонками.
+    col_med_growth = "Прирост ОД по кластеру (медиана), тыс. руб."
+    col_med_rate = "Темп прироста по кластеру (медиана), %"
+    final_result[col_med_growth] = final_result.groupby("Кластер", dropna=False)[
+        "Прирост ОД, тыс. руб."
+    ].transform("median")
+    final_result[col_med_rate] = final_result.groupby("Кластер", dropna=False)[
+        "Темп прироста, %"
+    ].transform("median")
+    cols_base = [c for c in final_result.columns if c not in (col_med_growth, col_med_rate)]
+    pos = cols_base.index("Кластер") + 1
+    final_result = final_result[cols_base[:pos] + [col_med_growth, col_med_rate] + cols_base[pos:]]
     matched_cluster = int((final_result["Кластер"] != "НЕ НАЙДЕН").sum())
     LOGGER.info(
         "Кластер: совпало со справочником OrgUnit %d строк из %d",
