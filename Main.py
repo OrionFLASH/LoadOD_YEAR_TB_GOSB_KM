@@ -37,6 +37,7 @@ TIMESTAMP: str = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
 LOG_STAMP: str = datetime.now().strftime("%Y%m%d_%H")
 RUN_YEAR: str = datetime.now().strftime("%Y")
 RUN_DAY_MONTH: str = datetime.now().strftime("%d-%m")
+RUN_MONTH_DAY: str = datetime.now().strftime("%m-%d")
 
 
 def load_config() -> dict[str, Any]:
@@ -79,6 +80,10 @@ STATS_BASENAME: str = str(CONFIG["output"]["stats_basename"])
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(LOG_FOLDER, exist_ok=True)
 
+# Логи текущего запуска складываются в log/YYYY/MM-DD.
+RUN_LOG_FOLDER: str = os.path.join(LOG_FOLDER, RUN_YEAR, RUN_MONTH_DAY)
+os.makedirs(RUN_LOG_FOLDER, exist_ok=True)
+
 # Все выходные артефакты текущего запуска складываются в OUT по шаблону из Config.json.
 if OUTPUT_LAYOUT_BY_DATE and OUTPUT_DATE_LAYOUT == "YYYY/DD-MM":
     RUN_OUTPUT_FOLDER: str = os.path.join(OUTPUT_FOLDER, RUN_YEAR, RUN_DAY_MONTH)
@@ -94,8 +99,8 @@ def setup_logger() -> logging.Logger:
     logger.handlers.clear()
     logger.propagate = False
 
-    info_path = os.path.join(LOG_FOLDER, f"INFO_parser_{LOG_STAMP}.log")
-    debug_path = os.path.join(LOG_FOLDER, f"DEBUG_parser_{LOG_STAMP}.log")
+    info_path = os.path.join(RUN_LOG_FOLDER, f"INFO_parser_{LOG_STAMP}.log")
+    debug_path = os.path.join(RUN_LOG_FOLDER, f"DEBUG_parser_{LOG_STAMP}.log")
 
     info_handler = logging.FileHandler(info_path, encoding="utf-8")
     info_handler.setLevel(logging.INFO)
