@@ -657,19 +657,22 @@ def main() -> None:
     orgunit_map = load_orgunit_mapping()
     final_result = pd.merge(dyn_group, orgunit_map, on="Код ГОСБ", how="left")
     final_result["Кластер"] = final_result["Кластер"].fillna("НЕ НАЙДЕН")
-    # Медианы по всем строкам с тем же кластером (для сравнения строки с «типичным» уровнем кластера).
+    # Медианы: (1) по кластеру целиком; (2) по паре кластер + дата загрузки.
     # В именах сохраняем «Прирост» / «Темп прироста», чтобы форматирование листа совпало с остальными колонками.
     col_med_growth = "Прирост ОД по кластеру (медиана), тыс. руб."
     col_med_rate = "Темп прироста по кластеру (медиана), %"
-    final_result[col_med_growth] = final_result.groupby("Кластер", dropna=False)[
-        "Прирост ОД, тыс. руб."
-    ].transform("median")
-    final_result[col_med_rate] = final_result.groupby("Кластер", dropna=False)[
-        "Темп прироста, %"
-    ].transform("median")
-    cols_base = [c for c in final_result.columns if c not in (col_med_growth, col_med_rate)]
+    col_med_growth_date = "Прирост ОД по кластеру в дату загрузки (медиана), тыс. руб."
+    col_med_rate_date = "Темп прироста по кластеру в дату загрузки (медиана), %"
+    g_cluster = final_result.groupby("Кластер", dropna=False)
+    final_result[col_med_growth] = g_cluster["Прирост ОД, тыс. руб."].transform("median")
+    final_result[col_med_rate] = g_cluster["Темп прироста, %"].transform("median")
+    g_cluster_date = final_result.groupby(["Кластер", "Дата загрузки"], dropna=False)
+    final_result[col_med_growth_date] = g_cluster_date["Прирост ОД, тыс. руб."].transform("median")
+    final_result[col_med_rate_date] = g_cluster_date["Темп прироста, %"].transform("median")
+    _med_cols = [col_med_growth, col_med_rate, col_med_growth_date, col_med_rate_date]
+    cols_base = [c for c in final_result.columns if c not in _med_cols]
     pos = cols_base.index("Кластер") + 1
-    final_result = final_result[cols_base[:pos] + [col_med_growth, col_med_rate] + cols_base[pos:]]
+    final_result = final_result[cols_base[:pos] + _med_cols + cols_base[pos:]]
     matched_cluster = int((final_result["Кластер"] != "НЕ НАЙДЕН").sum())
     LOGGER.info(
         "Кластер: совпало со справочником OrgUnit %d строк из %d",
