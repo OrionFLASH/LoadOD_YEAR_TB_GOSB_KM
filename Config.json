@@ -13,8 +13,11 @@
     "input_sheet": "Sheet1"
   },
   "processing": {
-    "max_workers": 12,
+    "max_workers": 0,
     "xlsx_export_limit": 1000000
+  },
+  "runtime": {
+    "console_verbosity": "normal"
   },
   "columns_to_load": [
     "ИНН_12",

@@ -20,7 +20,6 @@ import glob
 import json
 import logging
 import os
-import re
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -67,7 +66,7 @@ ORGUNIT_FOLDER: str = os.path.join(SCRIPT_DIR, str(CONFIG["paths"]["orgunit_fold
 INPUT_FILE_GLOB: str = str(CONFIG["patterns"]["input_file_glob"])
 ORGUNIT_FILE_GLOB: str = str(CONFIG["patterns"]["orgunit_file_glob"])
 INPUT_SHEET: str = str(CONFIG["excel"]["input_sheet"])
-MAX_WORKERS: int = int(CONFIG["processing"]["max_workers"])
+MAX_WORKERS_CONFIG: int = int(CONFIG["processing"]["max_workers"])
 XLSX_EXPORT_LIMIT: int = int(CONFIG["processing"]["xlsx_export_limit"])
 
 OUTPUT_LAYOUT_BY_DATE: bool = bool(CONFIG["output"]["layout_by_date"])
@@ -78,6 +77,9 @@ LAST_KM_BASENAME: str = str(CONFIG["output"]["last_km_basename"])
 DYN_BASENAME: str = str(CONFIG["output"]["dyn_basename"])
 FINAL_BASENAME: str = str(CONFIG["output"]["final_basename"])
 STATS_BASENAME: str = str(CONFIG["output"]["stats_basename"])
+CONSOLE_VERBOSITY: str = str(CONFIG.get("runtime", {}).get("console_verbosity", "normal")).lower()
+if CONSOLE_VERBOSITY not in {"quiet", "normal", "verbose"}:
+    CONSOLE_VERBOSITY = "normal"
 
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(LOG_FOLDER, exist_ok=True)
@@ -144,30 +146,33 @@ def log_debug(message: str, class_name: str = "-", def_name: str = "-") -> None:
     LOGGER.debug(message, extra={"class_name": class_name, "def_name": def_name})
 
 
-def clean_numeric_string(value: Any) -> str:
-    """Оставляет только цифры в значении, возвращает пустую строку для NaN."""
-    if pd.isna(value):
-        return ""
-    raw = str(value).strip()
-    digits = re.sub(r"\D", "", raw)
-    return digits
+def _verbosity_value(level: str) -> int:
+    """Преобразует текстовый уровень детализации в число."""
+    mapping = {"quiet": 0, "normal": 1, "verbose": 2}
+    return mapping[level]
 
 
-def normalize_inn(value: Any) -> str:
-    """Нормализация ИНН в 12-значный формат с лидирующими нулями."""
-    return clean_numeric_string(value).zfill(12)[:12]
+def cprint(message: str, level: str = "normal") -> None:
+    """Печатает сообщение в консоль согласно уровню детализации."""
+    if _verbosity_value(CONSOLE_VERBOSITY) >= _verbosity_value(level):
+        print(message)
 
 
-def normalize_tn10(value: Any) -> str:
-    """Нормализация ТН 10 в 8-значный формат с лидирующими нулями."""
-    return clean_numeric_string(value).zfill(8)[:8]
+def fmt_elapsed(seconds: float) -> str:
+    """Форматирует длительность в читаемый вид."""
+    return f"{seconds:.1f}с"
 
 
-def normalize_code(value: Any) -> str:
-    """Нормализация кодов ТБ/ГОСБ в строку без лишних пробелов."""
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
+def resolve_max_workers(config_value: int) -> tuple[int, str]:
+    """
+    Определяет число потоков:
+    - если config_value > 0: используем заданное значение;
+    - если config_value == 0: авто по числу логических ядер.
+    """
+    if config_value > 0:
+        return config_value, "fixed"
+    cpu_count = os.cpu_count() or 1
+    return max(1, cpu_count), "auto"
 
 
 def save_table(df: pd.DataFrame, base_path_without_ext: str) -> int:
@@ -181,29 +186,6 @@ def save_table(df: pd.DataFrame, base_path_without_ext: str) -> int:
         df.to_excel(xlsx_path, index=False, engine="openpyxl")
 
     return rows
-
-
-def calc_growth_rate(row: pd.Series) -> float | None:
-    """Темп прироста по правилам ToDo."""
-    prev_val = row["Сумма ПРОШЛЫЙ ГОД ОД, тыс. руб."]
-    curr_val = row["Сумма ТЕКУЩИЙ ГОД ОД, тыс. руб."]
-
-    if pd.isna(prev_val) or pd.isna(curr_val):
-        return None
-    if prev_val == 0:
-        if curr_val > 0:
-            return 100.0
-        if curr_val < 0:
-            return -100.0
-        return 0.0
-    return (curr_val - prev_val) / abs(prev_val) * 100.0
-
-
-def get_max_od_row(group: pd.DataFrame) -> pd.Series:
-    """Возвращает запись с максимальным текущим ОД в группе."""
-    if group["ТЕКУЩИЙ ГОД ОД, тыс. руб."].isna().all():
-        return group.iloc[0]
-    return group.loc[group["ТЕКУЩИЙ ГОД ОД, тыс. руб."].idxmax()]
 
 
 def load_single_file(file_path: str) -> tuple[pd.DataFrame | None, dict[str, Any]]:
@@ -312,8 +294,8 @@ def load_orgunit_mapping() -> pd.DataFrame:
         )
 
     org_df = org_df[["GOSB_CODE", "CLUSTER"]].copy()
-    org_df["Код ГОСБ"] = org_df["GOSB_CODE"].apply(normalize_code)
-    org_df["Кластер"] = org_df["CLUSTER"].astype(str).str.strip()
+    org_df["Код ГОСБ"] = org_df["GOSB_CODE"].astype("string").fillna("").str.strip()
+    org_df["Кластер"] = org_df["CLUSTER"].astype("string").fillna("").str.strip()
     org_df = org_df[["Код ГОСБ", "Кластер"]].drop_duplicates()
     return org_df
 
@@ -333,20 +315,23 @@ def auto_fit_worksheet(ws: Any) -> None:
 def main() -> None:
     """Основной сценарий обработки данных."""
     total_start = datetime.now()
+    total_start_perf = time.perf_counter()
+    resolved_workers, workers_mode = resolve_max_workers(MAX_WORKERS_CONFIG)
     LOGGER.info("Старт обработки ОД")
     log_debug("Старт обработки ОД", def_name="main")
 
-    print("=" * 70)
-    print("НАЧАЛО ОБРАБОТКИ (ВЕРСИЯ v3.0)")
-    print("=" * 70)
-    print(f"Время запуска:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Рабочая папка:         {SCRIPT_DIR}")
-    print(f"Входная папка (IN):    {INPUT_FOLDER}")
-    print(f"Папка OrgUnit:         {ORGUNIT_FOLDER}")
-    print(f"Выходная папка (OUT):  {RUN_OUTPUT_FOLDER}")
-    print(f"Папка логов:           {LOG_FOLDER}")
-    print(f"Таймштамп:             {TIMESTAMP}")
-    print(f"Потоков загрузки:      {MAX_WORKERS}")
+    cprint("=" * 70)
+    cprint("НАЧАЛО ОБРАБОТКИ (ВЕРСИЯ v3.1)")
+    cprint("=" * 70)
+    cprint(f"Время запуска:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    cprint(f"Рабочая папка:         {SCRIPT_DIR}", level="verbose")
+    cprint(f"Входная папка (IN):    {INPUT_FOLDER}", level="verbose")
+    cprint(f"Папка OrgUnit:         {ORGUNIT_FOLDER}", level="verbose")
+    cprint(f"Выходная папка (OUT):  {RUN_OUTPUT_FOLDER}")
+    cprint(f"Папка логов:           {RUN_LOG_FOLDER}")
+    cprint(f"Таймштамп:             {TIMESTAMP}", level="verbose")
+    cprint(f"Потоков загрузки:      {resolved_workers} (режим: {workers_mode})")
+    cprint(f"Уровень консоли:       {CONSOLE_VERBOSITY}")
 
     if not os.path.exists(INPUT_FOLDER):
         raise FileNotFoundError("Папка IN не существует.")
@@ -356,19 +341,19 @@ def main() -> None:
     if not file_list:
         raise FileNotFoundError("В папке IN нет XLSX-файлов.")
 
-    print(f"\nНайдено XLSX файлов: {len(file_list)}")
+    cprint(f"\nНайдено XLSX файлов: {len(file_list)}")
     for idx, fp in enumerate(file_list, start=1):
-        print(f"  [{idx:2d}] {os.path.basename(fp)}")
+        cprint(f"  [{idx:2d}] {os.path.basename(fp)}", level="verbose")
 
     dfs: list[pd.DataFrame] = []
     stats: list[dict[str, Any]] = []
 
-    print("\n" + "=" * 70)
-    print(f"ЗАГРУЗКА ФАЙЛОВ (параллельно, {MAX_WORKERS} потоков)")
-    print("=" * 70)
+    cprint("\n" + "=" * 70)
+    cprint(f"ЗАГРУЗКА ФАЙЛОВ (параллельно, {resolved_workers} потоков)")
+    cprint("=" * 70)
 
     stage_start = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=resolved_workers) as executor:
         future_to_file = {executor.submit(load_single_file, path): path for path in file_list}
         completed = 0
         for future in as_completed(future_to_file):
@@ -378,23 +363,33 @@ def main() -> None:
             stats.append(file_stat)
             if df_part is not None:
                 dfs.append(df_part)
-                print(
+                elapsed_total = time.perf_counter() - total_start_perf
+                cprint(
                     f"[{completed:2d}/{len(file_list)}] ✓ {file_name[:45]:<45} | "
-                    f"{len(df_part):>8,} строк"
+                    f"исх: {file_stat['Строк исходных']:>8,} | "
+                    f"удалено(СЗ): {file_stat['Удалено серая зона']:>7,} | "
+                    f"осталось: {file_stat['Строк после фильтра']:>8,} | "
+                    f"файл: {fmt_elapsed(file_stat['Время загрузки (сек)'])} | "
+                    f"с начала: {fmt_elapsed(elapsed_total)}",
+                    level="normal",
                 )
             else:
-                print(f"[{completed:2d}/{len(file_list)}] ✗ {file_name}: {file_stat['Ошибка'][:55]}")
-    print(f"⏱ Этап загрузки: {time.perf_counter() - stage_start:.1f} сек")
+                cprint(f"[{completed:2d}/{len(file_list)}] ✗ {file_name}: {file_stat['Ошибка'][:55]}")
+    stage_elapsed = time.perf_counter() - stage_start
+    total_elapsed = time.perf_counter() - total_start_perf
+    cprint(f"⏱ Этап загрузки: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
 
     if not dfs:
         raise RuntimeError("Нет успешно загруженных файлов.")
 
-    print("\nОбъединение данных...")
+    cprint("\nОбъединение данных...")
     stage_start = time.perf_counter()
     df_combined = pd.concat(dfs, ignore_index=True, copy=False)
     del dfs
-    print(f"Объединено строк: {len(df_combined):,}")
-    print(f"⏱ Этап объединения: {time.perf_counter() - stage_start:.1f} сек")
+    cprint(f"Объединено строк: {len(df_combined):,}")
+    stage_elapsed = time.perf_counter() - stage_start
+    total_elapsed = time.perf_counter() - total_start_perf
+    cprint(f"⏱ Этап объединения: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
 
     total_grey_removed = sum(s["Удалено серая зона"] for s in stats if s["Статус"] == "OK")
     errors_date = int(df_combined["Дата загрузки"].isna().sum())
@@ -409,13 +404,18 @@ def main() -> None:
     output_final_base = os.path.join(RUN_OUTPUT_FOLDER, f"{FINAL_BASENAME}_{TIMESTAMP}")
     output_stats_xlsx = os.path.join(RUN_OUTPUT_FOLDER, f"{STATS_BASENAME}_{TIMESTAMP}.xlsx")
 
-    print("\nСохранение сырого слоя...")
+    cprint("\nСохранение сырого слоя...", level="verbose")
     stage_start = time.perf_counter()
     df_combined.to_csv(output_raw_csv, index=False, sep=";", decimal=",", encoding="utf-8-sig")
-    print(f"✓ {os.path.basename(output_raw_csv)}")
-    print(f"⏱ Этап сохранения raw: {time.perf_counter() - stage_start:.1f} сек")
+    cprint(f"✓ {os.path.basename(output_raw_csv)}", level="verbose")
+    stage_elapsed = time.perf_counter() - stage_start
+    total_elapsed = time.perf_counter() - total_start_perf
+    cprint(
+        f"⏱ Этап сохранения raw: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}",
+        level="verbose",
+    )
 
-    print("\nАгрегация по ключу...")
+    cprint("\nАгрегация по ключу...")
     stage_start = time.perf_counter()
     agg_df = df_combined.groupby(GROUP_KEY, as_index=False, dropna=False, sort=False).agg(
         {
@@ -431,11 +431,13 @@ def main() -> None:
         inplace=True,
     )
     agg_df.to_csv(output_agg_csv, index=False, sep=";", decimal=",", encoding="utf-8-sig")
-    print(f"Агрегированных строк: {len(agg_df):,}")
-    print(f"✓ {os.path.basename(output_agg_csv)}")
-    print(f"⏱ Этап агрегации: {time.perf_counter() - stage_start:.1f} сек")
+    cprint(f"Агрегированных строк: {len(agg_df):,}")
+    cprint(f"✓ {os.path.basename(output_agg_csv)}", level="verbose")
+    stage_elapsed = time.perf_counter() - stage_start
+    total_elapsed = time.perf_counter() - total_start_perf
+    cprint(f"⏱ Этап агрегации: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
 
-    print("\nОпределение последнего КМ...")
+    cprint("\nОпределение последнего КМ...")
     stage_start = time.perf_counter()
     df_for_last_km = df_combined[df_combined["Дата загрузки"].notna()].copy()
     max_keys = ["ИНН_12", "Код ТБ", "Код ГОСБ", "Дата загрузки"]
@@ -484,10 +486,12 @@ def main() -> None:
         how="left",
     )
     save_table(last_km_with_dates, output_last_km_base)
-    print(f"Строк в 03_last_km_by_inn_tb: {len(last_km_with_dates):,}")
-    print(f"⏱ Этап последнего КМ: {time.perf_counter() - stage_start:.1f} сек")
+    cprint(f"Строк в 03_last_km_by_inn_tb: {len(last_km_with_dates):,}")
+    stage_elapsed = time.perf_counter() - stage_start
+    total_elapsed = time.perf_counter() - total_start_perf
+    cprint(f"⏱ Этап последнего КМ: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
 
-    print("\nРасчет динамики по последнему КМ...")
+    cprint("\nРасчет динамики по последнему КМ...")
     stage_start = time.perf_counter()
     last_km_key = last_km_result[["ИНН_12", "Код ТБ", "Код ГОСБ", "Последний КМ"]]
     df_with_last = pd.merge(
@@ -531,21 +535,25 @@ def main() -> None:
     dyn_group["Темп прироста, %"] = growth_rate
 
     save_table(dyn_group, output_dyn_base)
-    print(f"Строк в 04_km_dynamics: {len(dyn_group):,}")
-    print(f"⏱ Этап динамики: {time.perf_counter() - stage_start:.1f} сек")
+    cprint(f"Строк в 04_km_dynamics: {len(dyn_group):,}")
+    stage_elapsed = time.perf_counter() - stage_start
+    total_elapsed = time.perf_counter() - total_start_perf
+    cprint(f"⏱ Этап динамики: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
 
-    print("\nЗагрузка OrgUnit и обогащение кластером...")
+    cprint("\nЗагрузка OrgUnit и обогащение кластером...")
     stage_start = time.perf_counter()
     orgunit_map = load_orgunit_mapping()
     final_result = pd.merge(dyn_group, orgunit_map, on="Код ГОСБ", how="left")
     final_result["Кластер"] = final_result["Кластер"].fillna("НЕ НАЙДЕН")
     save_table(final_result, output_final_base)
-    print(f"Строк в 05_final_result_with_cluster: {len(final_result):,}")
-    print(f"Непросопоставленных кластеров: {int((final_result['Кластер'] == 'НЕ НАЙДЕН').sum()):,}")
-    print(f"⏱ Этап кластера: {time.perf_counter() - stage_start:.1f} сек")
+    cprint(f"Строк в 05_final_result_with_cluster: {len(final_result):,}")
+    cprint(f"Непросопоставленных кластеров: {int((final_result['Кластер'] == 'НЕ НАЙДЕН').sum()):,}")
+    stage_elapsed = time.perf_counter() - stage_start
+    total_elapsed = time.perf_counter() - total_start_perf
+    cprint(f"⏱ Этап кластера: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}")
 
     # ===== СТАТИСТИКА =====
-    print("\nФормирование статистики...")
+    cprint("\nФормирование статистики...", level="verbose")
     stage_start = time.perf_counter()
     stats.sort(key=lambda x: x["Файл"])
     wb = Workbook()
@@ -580,7 +588,8 @@ def main() -> None:
     ws.append([])
     ws.append(["ИТОГО:"])
     ws.append(["Время обработки", TIMESTAMP])
-    ws.append(["Потоков", MAX_WORKERS])
+    ws.append(["Потоков (факт)", resolved_workers])
+    ws.append(["Режим потоков", workers_mode])
     ws.append(["Всего XLSX файлов", len(file_list)])
     ws.append(["Успешно загружено", len([s for s in stats if s["Статус"] == "OK"])])
     ws.append(["С ошибками", len([s for s in stats if s["Статус"] == "ОШИБКА"])])
@@ -602,25 +611,30 @@ def main() -> None:
     ws.append(["Общее время (мин)", round((datetime.now() - total_start).total_seconds() / 60, 2)])
     auto_fit_worksheet(ws)
     wb.save(output_stats_xlsx)
-    print(f"✓ {os.path.basename(output_stats_xlsx)}")
-    print(f"⏱ Этап статистики: {time.perf_counter() - stage_start:.1f} сек")
+    cprint(f"✓ {os.path.basename(output_stats_xlsx)}", level="verbose")
+    stage_elapsed = time.perf_counter() - stage_start
+    total_elapsed = time.perf_counter() - total_start_perf
+    cprint(
+        f"⏱ Этап статистики: {fmt_elapsed(stage_elapsed)} | с начала: {fmt_elapsed(total_elapsed)}",
+        level="verbose",
+    )
 
     total_time = (datetime.now() - total_start).total_seconds()
     LOGGER.info("Обработка завершена успешно за %.2f сек", total_time)
     log_debug("Обработка завершена успешно", def_name="main")
 
-    print("\n" + "=" * 70)
-    print("ОБРАБОТКА ЗАВЕРШЕНА")
-    print("=" * 70)
-    print(f"⏱ ОБЩЕЕ ВРЕМЯ: {total_time:.1f} сек ({total_time / 60:.2f} мин)")
-    print("\nВыходные файлы в OUT:")
-    print(f"  1. {os.path.basename(output_raw_csv)}")
-    print(f"  2. {os.path.basename(output_agg_csv)}")
-    print(f"  3. {os.path.basename(output_last_km_base)}.csv[.xlsx]")
-    print(f"  4. {os.path.basename(output_dyn_base)}.csv[.xlsx]")
-    print(f"  5. {os.path.basename(output_final_base)}.csv[.xlsx]   <-- основной итог")
-    print(f"  6. {os.path.basename(output_stats_xlsx)}")
-    print("=" * 70)
+    cprint("\n" + "=" * 70)
+    cprint("ОБРАБОТКА ЗАВЕРШЕНА")
+    cprint("=" * 70)
+    cprint(f"⏱ ОБЩЕЕ ВРЕМЯ: {total_time:.1f} сек ({total_time / 60:.2f} мин)")
+    cprint("\nВыходные файлы в OUT:")
+    cprint(f"  1. {os.path.basename(output_raw_csv)}")
+    cprint(f"  2. {os.path.basename(output_agg_csv)}", level="verbose")
+    cprint(f"  3. {os.path.basename(output_last_km_base)}.csv[.xlsx]", level="verbose")
+    cprint(f"  4. {os.path.basename(output_dyn_base)}.csv[.xlsx]", level="verbose")
+    cprint(f"  5. {os.path.basename(output_final_base)}.csv[.xlsx]   <-- основной итог")
+    cprint(f"  6. {os.path.basename(output_stats_xlsx)}", level="verbose")
+    cprint("=" * 70)
 
 
 if __name__ == "__main__":
