@@ -1,0 +1,47 @@
+{
+  "paths": {
+    "input_folder": "IN",
+    "output_folder": "OUT",
+    "log_folder": "log",
+    "orgunit_folder": "IN/OrgUnit"
+  },
+  "patterns": {
+    "input_file_glob": "*.xlsx",
+    "orgunit_file_glob": "*.csv"
+  },
+  "excel": {
+    "input_sheet": "Sheet1"
+  },
+  "processing": {
+    "max_workers": 12,
+    "xlsx_export_limit": 1000000
+  },
+  "columns_to_load": [
+    "ИНН_12",
+    "ТН 10",
+    "Код ТБ",
+    "Код ГОСБ",
+    "ТБ",
+    "ГОСБ",
+    "КМ",
+    "Дата загрузки",
+    "ПРОШЛЫЙ ГОД ОД, тыс. руб.",
+    "ТЕКУЩИЙ ГОД ОД, тыс. руб."
+  ],
+  "group_key": [
+    "ИНН_12",
+    "Код ТБ",
+    "Код ГОСБ",
+    "Дата загрузки"
+  ],
+  "output": {
+    "layout_by_date": true,
+    "date_layout": "YYYY/DD-MM",
+    "raw_basename": "01_raw_combined",
+    "agg_basename": "02_aggregated",
+    "last_km_basename": "03_last_km_by_inn_tb",
+    "dyn_basename": "04_km_dynamics",
+    "final_basename": "05_final_result_with_cluster",
+    "stats_basename": "06_statistics"
+  }
+}
