@@ -161,7 +161,7 @@ def cprint(message: str, level: str = "normal") -> None:
 
 def fmt_elapsed(seconds: float) -> str:
     """Форматирует длительность в читаемый вид."""
-    return f"{seconds:.1f}с"
+    return f"{seconds:.2f}с"
 
 
 def resolve_max_workers(config_value: int) -> tuple[int, str]:
@@ -274,7 +274,7 @@ def build_stats_frames(
 def load_single_file(file_path: str) -> tuple[pd.DataFrame | None, dict[str, Any]]:
     """Загрузка одного Excel-файла с очисткой и нормализацией."""
     file_name = os.path.basename(file_path)
-    start_time = datetime.now()
+    start_time_perf = time.perf_counter()
 
     file_stat: dict[str, Any] = {
         "Файл": file_name,
@@ -338,14 +338,14 @@ def load_single_file(file_path: str) -> tuple[pd.DataFrame | None, dict[str, Any
             + df["ТЕКУЩИЙ ГОД ОД, тыс. руб."].isna().sum()
         )
 
-        elapsed = (datetime.now() - start_time).total_seconds()
-        file_stat["Время загрузки (сек)"] = round(elapsed, 2)
+        elapsed = time.perf_counter() - start_time_perf
+        file_stat["Время загрузки (сек)"] = elapsed
         log_debug(f"Файл загружен успешно: {file_name}", def_name="load_single_file")
         return df, file_stat
     except Exception as exc:
         file_stat["Статус"] = "ОШИБКА"
         file_stat["Ошибка"] = str(exc)
-        file_stat["Время загрузки (сек)"] = round((datetime.now() - start_time).total_seconds(), 2)
+        file_stat["Время загрузки (сек)"] = time.perf_counter() - start_time_perf
         LOGGER.error("Ошибка загрузки файла %s: %s", file_name, exc)
         log_debug(f"Ошибка загрузки файла {file_name}: {exc}", def_name="load_single_file")
         return None, file_stat
