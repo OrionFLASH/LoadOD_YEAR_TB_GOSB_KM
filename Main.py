@@ -199,6 +199,39 @@ def should_export_to_xlsx(row_count: int) -> bool:
     return row_count < XLSX_EXPORT_LIMIT
 
 
+def append_sc_km_cluster_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Колонки «СЦ КМ» и «СЦ КЛАСТЕР»: как в Excel СЦЕПИТЬ(КМ;"_";ГГГГ-ММ-ДД) и то же для Кластер.
+    Вставляются сразу после колонки «КМ».
+    """
+    out = df.copy()
+    col_sc_km = "СЦ КМ"
+    col_sc_cl = "СЦ КЛАСТЕР"
+    ds = pd.to_datetime(out["Дата загрузки"], errors="coerce")
+    date_part = ds.dt.strftime("%Y-%m-%d").where(ds.notna(), "")
+    km_s = out["КМ"].astype("string").fillna("")
+    cluster_s = out["Кластер"].astype("string").fillna("")
+    out[col_sc_km] = km_s + "_" + date_part
+    out[col_sc_cl] = cluster_s + "_" + date_part
+    extra = [col_sc_km, col_sc_cl]
+    cols = [c for c in out.columns if c not in extra]
+    insert_at = cols.index("КМ") + 1
+    return out[cols[:insert_at] + extra + cols[insert_at:]]
+
+
+def build_km_cluster_list_sheet(final_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Уникальные ТН 10 + КМ + Кластер и число строк финального слоя по этому ключу.
+    Первая колонка в таблице — «ТН_10» (как в задании).
+    """
+    grouped = (
+        final_df.groupby(["ТН 10", "КМ", "Кластер"], dropna=False)
+        .size()
+        .reset_index(name="Количество строк")
+    )
+    return grouped.rename(columns={"ТН 10": "ТН_10"})
+
+
 def apply_sheet_formatting(ws: Any, headers: list[str]) -> None:
     """Применяет форматирование: заголовок, freeze, фильтры, форматы данных."""
     if not headers:
@@ -212,6 +245,7 @@ def apply_sheet_formatting(ws: Any, headers: list[str]) -> None:
         is_amount = ("ПРОШЛЫЙ" in name) or ("ТЕКУЩИЙ" in name) or ("Прирост" in name)
         is_date = "Дата" in name
         is_percent = "Темп прироста" in name
+        is_row_count = "Количество строк" in name
 
         if is_amount:
             num_fmt = "#,##0.00"
@@ -219,6 +253,8 @@ def apply_sheet_formatting(ws: Any, headers: list[str]) -> None:
             num_fmt = "DD.MM.YYYY"
         elif is_percent:
             num_fmt = "0.00%"
+        elif is_row_count:
+            num_fmt = "#,##0"
         else:
             num_fmt = None
 
@@ -673,6 +709,8 @@ def main() -> None:
     cols_base = [c for c in final_result.columns if c not in _med_cols]
     pos = cols_base.index("Кластер") + 1
     final_result = final_result[cols_base[:pos] + _med_cols + cols_base[pos:]]
+    # Сцепки КМ/кластера с датой (аналог СЦЕПИТЬ в Excel) — сразу после колонки «КМ».
+    final_result = append_sc_km_cluster_columns(final_result)
     matched_cluster = int((final_result["Кластер"] != "НЕ НАЙДЕН").sum())
     LOGGER.info(
         "Кластер: совпало со справочником OrgUnit %d строк из %d",
@@ -707,6 +745,9 @@ def main() -> None:
         total_minutes=total_minutes,
     )
 
+    # Справочник уникальных ТН+КМ+Кластер (для листа «СПИСОК КМ» в общем XLSX при наличии 05_final_cluster).
+    km_cluster_list_df = build_km_cluster_list_sheet(final_result)
+
     export_items: list[tuple[str, pd.DataFrame, str]] = [
         ("01_raw_combined", df_combined, output_raw_base),
         ("02_aggregated", agg_df, output_agg_base),
@@ -719,6 +760,7 @@ def main() -> None:
 
     xlsx_items = [(sheet, frame) for sheet, frame, _ in export_items if should_export_to_xlsx(len(frame))]
     csv_items = [(sheet, frame, base) for sheet, frame, base in export_items if not should_export_to_xlsx(len(frame))]
+    final_cluster_in_xlsx = any(s == "05_final_cluster" for s, _ in xlsx_items)
 
     cprint(
         f"Режим экспорта: смешанный | XLSX-листов: {len(xlsx_items)} | CSV-файлов: {len(csv_items)}"
@@ -729,8 +771,12 @@ def main() -> None:
         wb.remove(wb.active)
         for sheet, frame in xlsx_items:
             write_df_to_sheet(wb, sheet, frame)
+        if final_cluster_in_xlsx:
+            write_df_to_sheet(wb, "СПИСОК КМ", km_cluster_list_df)
         wb.save(output_all_xlsx)
         cprint(f"✓ {os.path.basename(output_all_xlsx)}")
+        if final_cluster_in_xlsx:
+            cprint("  + лист «СПИСОК КМ» (уникальные ТН_10+КМ+Кластер и количество строк)", level="normal")
     else:
         cprint("XLSX не создан: все таблицы превышают лимит строк.")
 
@@ -753,6 +799,8 @@ def main() -> None:
     cprint("\nВыходные файлы в OUT:")
     if xlsx_items:
         cprint(f"  XLSX: {os.path.basename(output_all_xlsx)}")
+        if final_cluster_in_xlsx:
+            cprint("    (включая лист «СПИСОК КМ» при наличии 05_final_cluster в книге)", level="verbose")
     else:
         cprint("  XLSX: не создан")
     if csv_items:
